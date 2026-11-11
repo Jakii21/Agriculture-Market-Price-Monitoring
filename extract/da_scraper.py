@@ -1,4 +1,6 @@
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import pandas as pd
 
@@ -12,6 +14,13 @@ PROXIES = {
     "http": None,
     "https": None
 }
+
+# Retry failed requests with exponential backoff
+session = requests.Session()
+
+retries = Retry(total=3, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
+
+session.mount("http://", HTTPAdapter(max_retries=retries))
 
 REGION = "130000000"
 
@@ -61,7 +70,7 @@ def get_date(commodity_id):
         "commodity": commodity_id
     }
 
-    response = requests.post(url, data=paylaod, headers=HEADERS, timeout=10, proxies=PROXIES)
+    response = session.post(url, data=paylaod, headers=HEADERS, timeout=30, proxies=PROXIES)
 
     price_date = pd.to_datetime(response.text.strip()).date()
 
@@ -80,7 +89,7 @@ def get_market_headers(commodity_id):
         "region": REGION
     }
 
-    response = requests.post(url, data=payload, headers=HEADERS, timeout=10, proxies=PROXIES)
+    response = session.post(url, data=payload, headers=HEADERS, timeout=30, proxies=PROXIES)
 
     soup = BeautifulSoup(response.text,"html.parser")
 
@@ -103,7 +112,7 @@ def get_price_rows(commodity_id):
         "commodity": commodity_id,
         "region": REGION }
 
-    response = requests.post(url, data=paylaod, headers=HEADERS, timeout=10, proxies=PROXIES)
+    response = session.post(url, data=paylaod, headers=HEADERS, timeout=30, proxies=PROXIES)
 
     soup = BeautifulSoup(response.text,"html.parser")
 
@@ -150,31 +159,35 @@ def scrape_category(commodity_id):
 
     categoryName = COMMODITIES[commodity_id]["name"]
 
-    priceDate = get_date(commodity_id)
-
-    headers = get_market_headers(commodity_id)
-
-    price_rows = get_price_rows(commodity_id)
-
+    try: 
+        priceDate = get_date(commodity_id)
+        headers = get_market_headers(commodity_id)
+        price_rows = get_price_rows(commodity_id)
+    except requests.exceptions.ConnectionError as e:
+        print(f" [Error] Could not connect to server for {categoryName}: {e}")
+        return pd.DataFrame()
+    except requests.exceptions.Timeout as e:
+        print(f" [Error] Request timed out for {categoryName}: {e}")
+        return pd.DataFrame()
+    
     records = build_records(price_rows, headers, priceDate, categoryName)
-
     df = pd.DataFrame(records)
-
     return df
 
 #-------------------------------------------------------------------------------------------
 
 def scrape_all():
-
-
     allData = []
 
     for cmmdty in COMMODITIES:
         df = scrape_category(cmmdty)            # This is where the commodity_id came from
-        allData.append(df)
-
+        if not df.empty:
+            allData.append(df)
+    if not allData:
+        print("No data was scraped from any category")
+        return pd.DataFrame()
+    
     finalDf = pd.concat(allData,ignore_index=True)
-
     return finalDf
 #-------------------------------------------------------------------------------------------
 
